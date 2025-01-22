@@ -86,7 +86,7 @@ while true; do
         # Check if the job contains the CFML Engine queried
         if [[ "$job_name" == *"${cfml_engine}"* ]]; then
           # If job name contains CFML Engine queried, capture status and conclusion
-          job_status=$(echo "$jobs_response" | jq -r ".jobs[$j] | {name: .name, status: .status, conclusion: .conclusion}")
+          job_status=$(echo "$jobs_response" | jq -r ".jobs[$j] | {name: .name, status: .status, conclusion: .conclusion, completed_at: .completed_at, url: .html_url}")
           
           # Add the job status to the jobs_status array
           jobs_status+="$job_status,"
