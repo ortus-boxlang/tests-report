@@ -30,7 +30,11 @@ jobs:
         
       - name: Cat summary report
         run: |
-          echo "SUMMARY_REPORT=$(cat summary.json)" >> $GITHUB_ENV
+          echo "REPOS_WITH_TEST=$(cat summary.json | jq -r '.repositories_with_tests')" >> $GITHUB_ENV
+          echo "REPOS_WITHOUT_TEST=$(cat summary.json | jq -r '.repositories_without_tests')" >> $GITHUB_ENV
+          echo "ANALYZED_REPOS=$(cat summary.json | jq -r '.analyzed_repositories')" >> $GITHUB_ENV
+          echo "SUCCESS_TESTS=$(cat summary.json | jq -r '.job_conclusions.success')" >> $GITHUB_ENV
+          echo "FAILED_TESTS=$(cat summary.json | jq -r '.job_conclusions.failure')" >> $GITHUB_ENV
 
       - name: Inform Slack
         uses: rtCamp/action-slack-notify@v2
@@ -38,7 +42,7 @@ jobs:
           SLACK_CHANNEL: boxlang
           SLACK_COLOR: ${{ job.status }} # or a specific color like 'green' or '#ff00ff'
           SLACK_ICON_EMOJI: ":bell:"
-          SLACK_MESSAGE: ${{ env.SUMMARY_REPORT }}
+          SLACK_MESSAGE: "${{ env.ANALYZED_REPOS}} repositories analyzed. ${{ env.REPOS_WITH_TEST }} with test :grinning: and ${{ env.REPOS_WITHOUT_TEST }} without tests :face_with_spiral_eyes:"
           SLACK_TITLE: "Boxlang tests report"
           SLACK_USERNAME: CI
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
