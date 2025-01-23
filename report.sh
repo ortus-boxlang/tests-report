@@ -1,152 +1,127 @@
 #!/bin/bash
 
-# Organization name
-org_name=$1
+# Get essential information from params
+organization_name=$1
 
-# CFML Engine to query (e.g., "boxlang@1")
-cfml_engine=$2
-
-# File to store the final JSON output for workflows that match with CFML Engine Tests
-output_file="workflows_status.json"
-
-# File to store the final JSON output for repositories excluded due no CFML Engine Tests found
-excluded_file="excluded_repos.json"
-
-# File to store the summary output in JSON format
+# General configs
+output_file="tests_status.json"
+excluded_repos_file="repos_with_no_tests.json"
 summary_file="summary.json"
 
-# Initialize the JSON objects in the output files
+# Init vars
+repos_with_tests=0
+repos_without_tests=0
+success_tests=0
+failed_tests=0
+neutral_tests=0
+repositories=""
+
+# Init output files
 echo "{" > "$output_file"
-echo "{" > "$excluded_file"
+echo "{" > "$excluded_repos_file"
 echo "{" > "$summary_file"
 
-# Initialize counters
-repos_with_cfml_engine=0
-repos_with_no_cfml_engine=0
-success_count=0
-failure_count=0
-neutral_count=0
+# Fetch repos in GitHub org
+repositories=$(gh api "/orgs/${organization_name}/repos?per_page=100")
+repositories_count=$(echo "$repositories" | jq '. | length')
 
-# Fetch all repositories from the organization
-page=1
-while true; do
-  # Fetch repositories from the API
-  repos_response=$(gh api "/orgs/${org_name}/repos?per_page=100&page=${page}")
-  repo_count=$(echo "$repos_response" | jq '. | length')
+if [[ $repositories_count -eq 0 ]]; then
+    echo "NO REPOSITORIES FOUND IN ${organization_name} GITHUB ORGANIZATION"
+    exit 1
+fi
 
-  if [[ $repo_count -eq 0 ]]; then
-    # No more repositories, exit the loop
-    break
-  fi
-
-  # Extract repository names and visibility
-  repo_info=$(echo "$repos_response" | jq -r '.[] | {name: .name, visibility: .visibility}')
-
-  # Iterate through each repository
-  for row in $(echo "$repo_info" | jq -r '. | @base64'); do
+reposities_info=$(echo "$repositories" | jq -r '.[] | {name: .name, visibility: .visibility}')
+for row in $(echo "$reposities_info" | jq -r '. | @base64'); do
     _jq() {
-      echo ${row} | base64 --decode | jq -r ${1}
+        echo ${row} | base64 --decode | jq -r ${1}
     }
+    repository_name=$(_jq '.name')
+    repository_visibility=$(_jq '.visibility')
 
-    repo_name=$(_jq '.name')
-    repo_visibility=$(_jq '.visibility')
+    echo "Processing repository: $repository_name (with $repository_visibility visibility)"
 
-    echo "Processing repository: $repo_name (Visibility: $repo_visibility)"
+    workflow_runs=$(gh api "/repos/${organization_name}/${repository_name}/actions/workflows/snapshot.yml/runs?per_page=1")
+    workflow_runs_counts=$(echo "$workflow_runs" | jq '.workflow_runs | length')
 
-    # Fetch the latest workflow run for the repository (per_page=1)
-    workflows_response=$(gh api "/repos/${org_name}/${repo_name}/actions/runs?per_page=1")
-
-    # Initialize an array to hold job statuses
-    jobs_status="["
+    # Initialize an array to hold jobs with tests
+    test_jobs="["
 
     # Flag to track if any job matched the filter
-    has_cfml_engine_job=false
+    has_tests=false
 
-    # Extract workflow run count (should be 1 as we're limiting to the latest)
-    workflow_count=$(echo "$workflows_response" | jq '.workflow_runs | length')
+    # Check if repository has workflow runs
+    if [[ $workflow_runs_counts -gt 0 ]]; then
+        workflow_run_id=$(echo "$workflow_runs" | jq -r '.workflow_runs[0].id')
 
-    if [[ $workflow_count -gt 0 ]]; then
-      # Extract workflow run ID (latest run)
-      run_id=$(echo "$workflows_response" | jq -r ".workflow_runs[0].id")
+        workflow_run_jobs=$(gh api "/repos/${organization_name}/${repository_name}/actions/runs/${workflow_run_id}/jobs")
 
-      # Fetch job details for the latest workflow run
-      jobs_response=$(gh api "/repos/${org_name}/${repo_name}/actions/runs/${run_id}/jobs")
-      
-      # Iterate over the jobs in the workflow run
-      job_count=$(echo "$jobs_response" | jq '.jobs | length')
-      for ((j=0; j<job_count; j++)); do
-        # Get the job name
-        job_name=$(echo "$jobs_response" | jq -r ".jobs[$j].name")
+        # Iterate over the jobs in the workflow run
+        workflow_run_jobs_count=$(echo "$workflow_run_jobs" | jq '.jobs | length')
+        for ((j=0; j<workflow_run_jobs_count; j++)); do
+            # Get Workflow run job name
+            job_name=$(echo "$workflow_run_jobs" | jq -r ".jobs[$j].name")
 
-        # Exclude jobs that contain the string "tests / Tests"
-        if [[ "$job_name" == *"Tests Results"* ]]; then
-          continue
-        fi
+            # Exclude jobs that contain the string "tests / Tests"
+            regex_to_exclude="^(build|Test Results|tests \/ Publish|Code Auto-Formatting|release)|^tests \/ Tests \(be,?\s*(lucee|adobe)@\d+\).*$ "
+            if [[ "$job_name" =~ $regex_to_exclude ]]; then
+                continue
+            fi
 
-        # Check if the job contains the CFML Engine queried
-        if [[ "$job_name" == *"${cfml_engine}"* ]]; then
-          # If job name contains CFML Engine queried, capture status and conclusion
-          job_status=$(echo "$jobs_response" | jq -r ".jobs[$j] | {name: .name, status: .status, conclusion: .conclusion, completed_at: .completed_at, url: .html_url}")
-          
-          # Add the job status to the jobs_status array
-          jobs_status+="$job_status,"
-          
-          # Mark that we found a matching job
-          has_cfml_engine_job=true
+            test_job=$(echo "$workflow_run_jobs" | jq -r ".jobs[$j] | {name: .name, status: .status, conclusion: .conclusion, completed_at: .completed_at, url: .html_url}")
+            # Add job to test_jobs array
+            test_jobs+="$test_job,"
 
-          # Count conclusion results
-          conclusion=$(echo "$jobs_response" | jq -r ".jobs[$j].conclusion")
-          if [[ "$conclusion" == "success" ]]; then
-            ((success_count++))
-          elif [[ "$conclusion" == "failure" ]]; then
-            ((failure_count++))
-          elif [[ "$conclusion" == "neutral" ]]; then
-            ((neutral_count++))  
-          fi
-        fi
-      done
+            # Test found in job
+            has_tests=true
+
+            # Count conclusion results
+            conclusion=$(echo "$test_job" | jq -r ".conclusion")
+            if [[ "$conclusion" == "success" ]]; then
+                ((success_tests++))
+            elif [[ "$conclusion" == "failure" ]]; then
+                ((failed_tests++))
+            elif [[ "$conclusion" == "neutral" ]]; then
+                ((neutral_tests++))  
+            fi
+        done
     fi
 
     # Remove the trailing comma and close the jobs array
-    jobs_status=${jobs_status%,}
-    jobs_status+="]"
+    test_jobs=${test_jobs%,}
+    test_jobs+="]"
 
     # Append the repository data to the JSON file if there is a matching job
-    if [[ "$has_cfml_engine_job" == true ]]; then
-      echo "\"$repo_name\": {\"visibility\": \"$repo_visibility\", \"jobs\": $jobs_status}," >> "$output_file"
-      ((repos_with_cfml_engine++))
+    if [[ "$has_tests" == true ]]; then
+      echo "\"$repository_name\": {\"visibility\": \"$repository_visibility\", \"jobs\": $test_jobs}," >> "$output_file"
+      ((repos_with_tests++))
     else
       # If no jobs matched the filter, add it to the excluded file
-      echo "\"$repo_name\": {\"visibility\": \"$repo_visibility\", \"jobs\": []}," >> "$excluded_file"
-      ((repos_with_no_cfml_engine++))
+      echo "\"$repository_name\": {\"visibility\": \"$repository_visibility\", \"jobs\": []}," >> "$excluded_repos_file"
+      ((repos_without_tests++))
     fi
-  done
-
-  # Increment page for the next batch of repositories
-  ((page++))
 done
 
 # Finalize both JSON objects (remove trailing commas and close the objects)
 sed -i '$ s/,$//' "$output_file"  # Remove the trailing comma
-sed -i '$ s/,$//' "$excluded_file"  # Remove the trailing comma
+sed -i '$ s/,$//' "$excluded_repos_file"  # Remove the trailing comma
 echo "}" >> "$output_file"
-echo "}" >> "$excluded_file"
+echo "}" >> "$excluded_repos_file"
 
 # Write summary to JSON file
 echo "{
-  \"repos_with_cfml_engine\": $repos_with_cfml_engine,
-  \"repos_with_no_cfml_engine\": $repos_with_no_cfml_engine,
+  \"organization\": \"$organization_name\",
+  \"repositories_with_tests\": $repos_with_tests,
+  \"repositories_without_tests\": $repos_without_tests,
+  \"analyzed_repositories\": $repositories_count,
   \"job_conclusions\": {
-    \"success\": $success_count,
-    \"failure\": $failure_count,
-    \"neutral\": $neutral_count
+    \"success\": $success_tests,
+    \"failure\": $failed_tests,
+    \"neutral\": $neutral_tests
   }
 }" > "$summary_file"
 
 # Print the summary in JSON format to the console
 cat "$summary_file"
-
-# Print the summary to the console
-echo ""
-echo "Workflow statuses for repositories with CFML Engine Tests have been stored in $output_file"
-echo "Repositories with no CFML Engine Tests jobs have been stored in $excluded_file"
+echo "================================================="
+echo "Workflow statuses for repositories with Tests have been stored in $output_file"
+echo "Repositories with no Tests jobs have been stored in $excluded_repos_file"
